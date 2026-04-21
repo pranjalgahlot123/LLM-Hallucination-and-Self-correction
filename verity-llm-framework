@@ -1,0 +1,492 @@
+import { useState } from "react";
+
+const phases = [
+  {
+    id: "P0",
+    label: "Foundation",
+    subtitle: "Knowledge Infrastructure",
+    duration: "Weeks 1–2",
+    color: "#00FFB2",
+    modules: [
+      {
+        name: "Knowledge Graph Builder",
+        icon: "◈",
+        description: "Construct a structured, queryable knowledge graph from your corpus using Neo4j or NetworkX. Entities, relationships, and facts are stored as triples — not just embeddings.",
+        why: "Vector search alone can't verify factual consistency. Graph traversal catches relational contradictions embeddings miss.",
+        tech: ["Neo4j / NetworkX", "spaCy NER", "Wikidata alignment", "FAISS + BM25 hybrid"],
+        output: "Dual retrieval: semantic + structural"
+      },
+      {
+        name: "Claim Extractor",
+        icon: "⊡",
+        description: "Before verifying anything, decompose every LLM output into atomic factual claims using an NLI-based extraction pipeline.",
+        why: "You can't verify 'The capital of France is Paris and it was founded in 250 BC' as one unit. Atomic decomposition is the foundation of everything downstream.",
+        tech: ["T5-based claim splitter", "OpenIE", "AllenNLP SRL", "Custom regex heuristics"],
+        output: "List of atomic, verifiable claims per response"
+      }
+    ]
+  },
+  {
+    id: "P1",
+    label: "Detection Engine",
+    subtitle: "Multi-Layer Verification Stack",
+    duration: "Weeks 3–5",
+    color: "#FF6B35",
+    modules: [
+      {
+        name: "Layer 1 — Grounding Verifier",
+        icon: "▣",
+        description: "Each atomic claim is matched against retrieved documents using tri-signal scoring: semantic similarity (cosine), lexical overlap (BM25), and entailment probability (NLI model).",
+        why: "A single signal is gameable. Cosine similarity alone passes paraphrased hallucinations. NLI alone misses entity-level errors. You need all three.",
+        tech: ["DeBERTa-v3 NLI", "Sentence-BERT", "BM25Okapi", "Weighted ensemble scorer"],
+        output: "Per-claim grounding score [0,1] + evidence sentence"
+      },
+      {
+        name: "Layer 2 — Consistency Prober",
+        icon: "⊞",
+        description: "The same question is rephrased 3–5 ways and sent to the LLM. Semantic disagreement between answers signals low-confidence or hallucinated regions.",
+        why: "If a fact is truly known, the model answers consistently regardless of phrasing. Variance = uncertainty = hallucination risk.",
+        tech: ["T5 question paraphraser", "BLEURT / BERTScore", "Semantic clustering", "Entropy-based divergence scorer"],
+        output: "Consistency vector per answer region"
+      },
+      {
+        name: "Layer 3 — Critic Model (Adversarial Verifier)",
+        icon: "◫",
+        description: "A fine-tuned 'critic' LLM is given: [original query + context + generated answer] and asked to produce a correctness verdict with justification.",
+        why: "This mimics peer review. The generator and critic have independent failure modes — making simultaneous failure exponentially rare.",
+        tech: ["Fine-tuned Mistral-7B critic", "Constitutional AI prompting", "RLHF-style reward signals", "Structured JSON output"],
+        output: "CORRECT / PARTIAL / WRONG + rationale"
+      },
+      {
+        name: "Layer 4 — Knowledge Graph Fact Check",
+        icon: "⊟",
+        description: "Entity and relation claims are validated directly against the knowledge graph using SPARQL-like queries. No embedding approximation — hard binary verification.",
+        why: "Embeddings can 'approximately match' wrong facts. Graph checks are exact. For factual claims like dates, names, statistics — exactness matters.",
+        tech: ["Neo4j Cypher queries", "Entity linker (BLINK)", "Relation extractor", "Wikidata SPARQL fallback"],
+        output: "VERIFIED / UNVERIFIED / CONTRADICTED per entity claim"
+      }
+    ]
+  },
+  {
+    id: "P2",
+    label: "Confidence Engine",
+    subtitle: "Probabilistic Scoring & Routing",
+    duration: "Week 6",
+    color: "#A78BFA",
+    modules: [
+      {
+        name: "Bayesian Confidence Aggregator",
+        icon: "∿",
+        description: "All four layer signals are fused using a learned Bayesian model, not simple weighted averaging. Weights are calibrated on a labeled dataset of known hallucinations.",
+        why: "Naive weighted averaging treats signals as independent. Bayes accounts for correlation between verifiers — critic and grounding often agree, so their joint value is less than 2x.",
+        tech: ["Bayesian calibration (Platt scaling)", "Isotonic regression", "Temperature scaling", "Reliability diagram eval"],
+        output: "Calibrated confidence score [0, 1] with uncertainty bounds"
+      },
+      {
+        name: "Routing Decision Gate",
+        icon: "⊕",
+        description: "Based on confidence + claim-level flags, responses are routed: PASS (deliver), SOFT-CORRECT (minor patch), HARD-CORRECT (full regeneration), or ESCALATE (human review).",
+        why: "Not all corrections cost the same. A date error in a citation needs hard correction. A tone inconsistency just needs a soft patch. Routing prevents over-correction.",
+        tech: ["Decision tree classifier", "Cost-sensitive routing", "SLA-aware timeout logic", "Async correction queue"],
+        output: "Route decision + correction priority map"
+      }
+    ]
+  },
+  {
+    id: "P3",
+    label: "Self-Correction Engine",
+    subtitle: "Agentic Refinement Loop",
+    duration: "Weeks 7–8",
+    color: "#38BDF8",
+    modules: [
+      {
+        name: "Surgical Claim Patcher",
+        icon: "⊗",
+        description: "For SOFT-CORRECT cases: only the flagged atomic claims are regenerated, not the whole response. The rest of the answer is preserved.",
+        why: "Full regeneration wastes compute and can introduce new errors in previously-correct regions. Surgical patching is precise and efficient.",
+        tech: ["Span-level edit model", "Constrained decoding", "In-context correction prompts", "Diff-and-merge logic"],
+        output: "Minimally-edited response with patches highlighted"
+      },
+      {
+        name: "Tree-of-Thought Regenerator",
+        icon: "⊜",
+        description: "For HARD-CORRECT cases: use Tree-of-Thought prompting to generate 5 candidate answers via different reasoning paths. Score each with the full verification stack. Return the highest-confidence path.",
+        why: "A single retry is just as likely to hallucinate again. Diverse reasoning paths explore different 'knowledge routes' — the best one is far more likely to be correct than a single retry.",
+        tech: ["ToT prompting (BFS/DFS)", "Monte Carlo Tree Search variant", "Per-branch confidence scoring", "Path selection via verifier"],
+        output: "Best-path answer with full reasoning trace"
+      },
+      {
+        name: "Iterative Reflection Agent",
+        icon: "↻",
+        description: "A meta-agent wraps the correction loop with a hard iteration budget (max 3 rounds). After each round, it checks: did confidence improve? If not, it escalates rather than looping endlessly.",
+        why: "Without a convergence check, correction loops can thrash. The agent needs to know when to stop trying and when to flag for human review.",
+        tech: ["ReAct-style agent loop", "Convergence delta threshold", "Escalation trigger", "Audit log per iteration"],
+        output: "Final answer OR escalation flag + full correction trace"
+      }
+    ]
+  },
+  {
+    id: "P4",
+    label: "Observability Layer",
+    subtitle: "Monitoring, Drift Detection & Retraining",
+    duration: "Weeks 9–10",
+    color: "#FB923C",
+    modules: [
+      {
+        name: "Hallucination Rate Monitor",
+        icon: "◬",
+        description: "Real-time dashboard tracking hallucination rates by query type, domain, model version, and confidence tier. Alerts fire when any category exceeds threshold.",
+        why: "Models degrade silently. Without monitoring, you won't know your system is failing until users complain. Proactive alerts let you catch regressions before they scale.",
+        tech: ["Prometheus + Grafana", "Sliding window metrics", "Anomaly detection (Z-score)", "Slack/PagerDuty alerts"],
+        output: "Live dashboard + automated alert system"
+      },
+      {
+        name: "Feedback & Active Learning Loop",
+        icon: "⊙",
+        description: "Every escalated or user-corrected response enters a retraining queue. The critic model is fine-tuned weekly on accumulated labeled failures.",
+        why: "The system must get smarter over time, not stay static. Real-world failures are the highest-signal training data you'll ever get.",
+        tech: ["Human-in-the-loop feedback UI", "Active learning sampler", "Weekly fine-tune pipeline", "Model version registry"],
+        output: "Continuously improving critic model + labeled dataset"
+      }
+    ]
+  }
+];
+
+const architectureLayers = [
+  { label: "User Query", color: "#94A3B8", icon: "◎" },
+  { label: "Query Understanding + Decomposer", color: "#00FFB2", icon: "◈" },
+  { label: "Dual Retriever (Semantic + Graph)", color: "#00FFB2", icon: "◈" },
+  { label: "Primary LLM Generator", color: "#FF6B35", icon: "▣" },
+  { label: "Claim Extractor", color: "#FF6B35", icon: "⊡" },
+  { label: "4-Layer Verification Stack", color: "#A78BFA", icon: "∿", highlight: true },
+  { label: "Bayesian Confidence Aggregator", color: "#A78BFA", icon: "⊕" },
+  { label: "Routing Decision Gate", color: "#38BDF8", icon: "⊗" },
+  { label: "Self-Correction Engine (ToT + Patch)", color: "#38BDF8", icon: "⊜" },
+  { label: "Final Response + Evidence + Trace", color: "#FB923C", icon: "◬" },
+];
+
+export default function App() {
+  const [activePhase, setActivePhase] = useState(0);
+  const [activeModule, setActiveModule] = useState(null);
+  const [view, setView] = useState("plan"); // plan | arch | summary
+
+  const phase = phases[activePhase];
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "#060810",
+      color: "#E2E8F0",
+      fontFamily: "'Courier New', monospace",
+      padding: "0",
+      overflowX: "hidden"
+    }}>
+      {/* Header */}
+      <div style={{
+        borderBottom: "1px solid #1E293B",
+        padding: "24px 32px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        position: "sticky",
+        top: 0,
+        background: "rgba(6,8,16,0.97)",
+        backdropFilter: "blur(12px)",
+        zIndex: 100
+      }}>
+        <div>
+          <div style={{ fontSize: "11px", letterSpacing: "4px", color: "#475569", marginBottom: "4px" }}>PROJECT BLUEPRINT v2.0</div>
+          <div style={{ fontSize: "20px", fontWeight: "bold", color: "#F8FAFC", letterSpacing: "-0.5px" }}>
+            VERITY — <span style={{ color: "#00FFB2" }}>Anti-Hallucination</span> Intelligence System
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: "8px" }}>
+          {["plan", "arch", "summary"].map(v => (
+            <button key={v} onClick={() => setView(v)} style={{
+              background: view === v ? "#00FFB2" : "transparent",
+              color: view === v ? "#060810" : "#64748B",
+              border: `1px solid ${view === v ? "#00FFB2" : "#1E293B"}`,
+              padding: "6px 16px",
+              borderRadius: "4px",
+              cursor: "pointer",
+              fontSize: "11px",
+              letterSpacing: "2px",
+              fontFamily: "inherit",
+              textTransform: "uppercase"
+            }}>{v}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* PLAN VIEW */}
+      {view === "plan" && (
+        <div style={{ display: "flex", height: "calc(100vh - 73px)" }}>
+          {/* Phase Sidebar */}
+          <div style={{
+            width: "220px",
+            borderRight: "1px solid #1E293B",
+            padding: "24px 0",
+            flexShrink: 0,
+            overflowY: "auto"
+          }}>
+            <div style={{ padding: "0 20px 16px", fontSize: "10px", letterSpacing: "3px", color: "#475569" }}>PHASES</div>
+            {phases.map((p, i) => (
+              <div key={p.id} onClick={() => { setActivePhase(i); setActiveModule(null); }} style={{
+                padding: "14px 20px",
+                cursor: "pointer",
+                borderLeft: activePhase === i ? `3px solid ${p.color}` : "3px solid transparent",
+                background: activePhase === i ? "rgba(255,255,255,0.03)" : "transparent",
+                transition: "all 0.15s"
+              }}>
+                <div style={{ fontSize: "10px", color: activePhase === i ? p.color : "#475569", letterSpacing: "2px", marginBottom: "4px" }}>{p.id} · {p.duration}</div>
+                <div style={{ fontSize: "13px", color: activePhase === i ? "#F8FAFC" : "#94A3B8", fontWeight: activePhase === i ? "bold" : "normal" }}>{p.label}</div>
+                <div style={{ fontSize: "11px", color: "#475569", marginTop: "2px" }}>{p.subtitle}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Main Content */}
+          <div style={{ flex: 1, overflowY: "auto", padding: "32px" }}>
+            <div style={{ marginBottom: "32px" }}>
+              <div style={{ fontSize: "10px", letterSpacing: "4px", color: phase.color, marginBottom: "8px" }}>{phase.id} · {phase.duration}</div>
+              <div style={{ fontSize: "28px", fontWeight: "bold", color: "#F8FAFC", marginBottom: "4px" }}>{phase.label}</div>
+              <div style={{ fontSize: "14px", color: "#64748B" }}>{phase.subtitle}</div>
+            </div>
+
+            <div style={{ display: "grid", gap: "16px" }}>
+              {phase.modules.map((mod, i) => (
+                <div key={i} onClick={() => setActiveModule(activeModule === i ? null : i)} style={{
+                  border: `1px solid ${activeModule === i ? phase.color : "#1E293B"}`,
+                  borderRadius: "8px",
+                  padding: "24px",
+                  cursor: "pointer",
+                  background: activeModule === i ? "rgba(255,255,255,0.02)" : "transparent",
+                  transition: "all 0.2s"
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: activeModule === i ? "20px" : "0" }}>
+                    <span style={{ fontSize: "24px", color: phase.color }}>{mod.icon}</span>
+                    <div>
+                      <div style={{ fontSize: "16px", fontWeight: "bold", color: "#F8FAFC" }}>{mod.name}</div>
+                      {activeModule !== i && <div style={{ fontSize: "12px", color: "#475569", marginTop: "2px" }}>Click to expand</div>}
+                    </div>
+                    <div style={{ marginLeft: "auto", color: "#475569", fontSize: "18px" }}>{activeModule === i ? "−" : "+"}</div>
+                  </div>
+
+                  {activeModule === i && (
+                    <div>
+                      <div style={{ fontSize: "14px", color: "#CBD5E1", lineHeight: "1.7", marginBottom: "20px", paddingLeft: "36px" }}>
+                        {mod.description}
+                      </div>
+
+                      <div style={{
+                        background: "rgba(0,255,178,0.05)",
+                        border: "1px solid rgba(0,255,178,0.15)",
+                        borderRadius: "6px",
+                        padding: "14px 18px",
+                        marginBottom: "16px",
+                        marginLeft: "36px"
+                      }}>
+                        <div style={{ fontSize: "10px", letterSpacing: "3px", color: "#00FFB2", marginBottom: "8px" }}>WHY THIS MATTERS</div>
+                        <div style={{ fontSize: "13px", color: "#94A3B8", lineHeight: "1.6" }}>{mod.why}</div>
+                      </div>
+
+                      <div style={{ marginLeft: "36px" }}>
+                        <div style={{ fontSize: "10px", letterSpacing: "3px", color: "#475569", marginBottom: "10px" }}>TECH STACK</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px" }}>
+                          {mod.tech.map((t, j) => (
+                            <span key={j} style={{
+                              fontSize: "11px",
+                              padding: "4px 10px",
+                              border: `1px solid ${phase.color}40`,
+                              borderRadius: "4px",
+                              color: phase.color,
+                              letterSpacing: "1px"
+                            }}>{t}</span>
+                          ))}
+                        </div>
+                        <div style={{
+                          fontSize: "12px",
+                          color: "#64748B",
+                          paddingTop: "12px",
+                          borderTop: "1px solid #1E293B"
+                        }}>
+                          <span style={{ color: "#475569", letterSpacing: "2px", fontSize: "10px" }}>OUTPUT → </span>
+                          {mod.output}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Nav */}
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: "32px" }}>
+              <button onClick={() => setActivePhase(Math.max(0, activePhase - 1))} disabled={activePhase === 0} style={{
+                background: "transparent",
+                border: "1px solid #1E293B",
+                color: activePhase === 0 ? "#1E293B" : "#94A3B8",
+                padding: "10px 24px",
+                borderRadius: "4px",
+                cursor: activePhase === 0 ? "default" : "pointer",
+                fontFamily: "inherit",
+                fontSize: "12px",
+                letterSpacing: "2px"
+              }}>← PREV PHASE</button>
+              <button onClick={() => setActivePhase(Math.min(phases.length - 1, activePhase + 1))} disabled={activePhase === phases.length - 1} style={{
+                background: activePhase === phases.length - 1 ? "transparent" : "#00FFB2",
+                border: "1px solid #00FFB2",
+                color: activePhase === phases.length - 1 ? "#1E293B" : "#060810",
+                padding: "10px 24px",
+                borderRadius: "4px",
+                cursor: activePhase === phases.length - 1 ? "default" : "pointer",
+                fontFamily: "inherit",
+                fontSize: "12px",
+                letterSpacing: "2px",
+                fontWeight: "bold"
+              }}>NEXT PHASE →</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ARCHITECTURE VIEW */}
+      {view === "arch" && (
+        <div style={{ padding: "40px 32px", maxWidth: "680px", margin: "0 auto" }}>
+          <div style={{ fontSize: "10px", letterSpacing: "4px", color: "#475569", marginBottom: "8px" }}>SYSTEM FLOW</div>
+          <div style={{ fontSize: "24px", fontWeight: "bold", color: "#F8FAFC", marginBottom: "32px" }}>End-to-End Architecture</div>
+
+          {architectureLayers.map((layer, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "stretch", marginBottom: "0" }}>
+              {/* Connector */}
+              <div style={{ width: "48px", display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
+                <div style={{
+                  width: "36px",
+                  height: "36px",
+                  border: `2px solid ${layer.color}`,
+                  borderRadius: "6px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "16px",
+                  color: layer.color,
+                  background: layer.highlight ? `${layer.color}15` : "transparent",
+                  flexShrink: 0
+                }}>{layer.icon}</div>
+                {i < architectureLayers.length - 1 && (
+                  <div style={{ width: "1px", flex: 1, background: `linear-gradient(${layer.color}60, ${architectureLayers[i+1].color}40)`, minHeight: "28px" }} />
+                )}
+              </div>
+
+              {/* Label */}
+              <div style={{
+                flex: 1,
+                paddingLeft: "16px",
+                paddingBottom: i < architectureLayers.length - 1 ? "20px" : "0",
+                paddingTop: "6px"
+              }}>
+                <div style={{
+                  fontSize: layer.highlight ? "16px" : "14px",
+                  fontWeight: layer.highlight ? "bold" : "normal",
+                  color: layer.highlight ? "#F8FAFC" : "#CBD5E1",
+                  border: layer.highlight ? `1px solid ${layer.color}50` : "none",
+                  padding: layer.highlight ? "8px 14px" : "0",
+                  borderRadius: layer.highlight ? "6px" : "0",
+                  background: layer.highlight ? `${layer.color}08` : "transparent",
+                  display: "inline-block"
+                }}>
+                  {layer.highlight && <span style={{ color: layer.color, marginRight: "8px" }}>★</span>}
+                  {layer.label}
+                </div>
+                {layer.highlight && (
+                  <div style={{ fontSize: "11px", color: "#475569", marginTop: "6px", paddingLeft: "14px" }}>
+                    Grounding · Consistency · Critic · Knowledge Graph
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+
+          <div style={{ marginTop: "48px", borderTop: "1px solid #1E293B", paddingTop: "32px" }}>
+            <div style={{ fontSize: "10px", letterSpacing: "4px", color: "#475569", marginBottom: "16px" }}>WHAT MAKES THIS DIFFERENT</div>
+            {[
+              ["Atomic Claim Verification", "Not sentence-level. Every fact is independently verifiable."],
+              ["4 Independent Verifier Layers", "Simultaneous multi-layer failure is exponentially unlikely."],
+              ["Bayesian Signal Fusion", "Calibrated confidence, not naive averaging."],
+              ["Surgical Correction", "Only wrong claims are re-generated, not full responses."],
+              ["Tree-of-Thought Fallback", "5 diverse reasoning paths scored, best one selected."],
+              ["Self-Improving Critic", "Weekly fine-tuning on real-world escalated failures."]
+            ].map(([title, desc], i) => (
+              <div key={i} style={{ display: "flex", gap: "12px", marginBottom: "14px" }}>
+                <div style={{ color: "#00FFB2", fontSize: "14px", flexShrink: 0, paddingTop: "1px" }}>→</div>
+                <div>
+                  <span style={{ color: "#F8FAFC", fontSize: "13px", fontWeight: "bold" }}>{title}: </span>
+                  <span style={{ color: "#64748B", fontSize: "13px" }}>{desc}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* SUMMARY VIEW */}
+      {view === "summary" && (
+        <div style={{ padding: "40px 32px", maxWidth: "780px", margin: "0 auto" }}>
+          <div style={{ fontSize: "10px", letterSpacing: "4px", color: "#475569", marginBottom: "8px" }}>VIVA DEFENSE + INTERVIEW</div>
+          <div style={{ fontSize: "24px", fontWeight: "bold", color: "#F8FAFC", marginBottom: "32px" }}>What to Say & Know Cold</div>
+
+          {[
+            {
+              q: "One-line summary?",
+              color: "#00FFB2",
+              a: `"VERITY is a post-generation AI verification system that decomposes every LLM response into atomic claims, validates each claim through 4 independent layers, computes a calibrated Bayesian confidence score, and surgically self-corrects only the failing claims — without regenerating what was already correct."`
+            },
+            {
+              q: "Why 4 verification layers?",
+              color: "#FF6B35",
+              a: "Each layer catches a different failure mode. Grounding catches unsupported facts. Consistency catches probabilistic uncertainty. The critic catches logical errors. The knowledge graph catches entity-level factual errors. No single layer catches everything — but all four together make simultaneous failure nearly impossible."
+            },
+            {
+              q: "Why not just use RAG?",
+              color: "#A78BFA",
+              a: "RAG reduces hallucination but doesn't eliminate it. A model can retrieve the right document and still generate a wrong claim about it. Verification is what closes that gap."
+            },
+            {
+              q: "What's the latency cost?",
+              color: "#38BDF8",
+              a: "~1.5–3x baseline latency for fully verified responses. Mitigated by: async verification for non-critical paths, surgical patching instead of full regeneration, caching verifier outputs for repeated claims, and routing simple queries past the full stack."
+            },
+            {
+              q: "How do you improve over time?",
+              color: "#FB923C",
+              a: "Every response flagged for human review enters an active learning queue. The critic model is fine-tuned weekly on labeled failures. The knowledge graph is updated continuously. Hallucination rate trends are monitored in real-time with anomaly detection."
+            },
+            {
+              q: "What's the hardest unsolved problem?",
+              color: "#F472B6",
+              a: "Grounding verification for novel or private knowledge that doesn't exist in any retrieval source. If there's nothing to ground against, our system flags uncertainty correctly — but can't verify. The honest answer: for truly novel questions, confidence will be low and the system escalates rather than guessing."
+            }
+          ].map(({ q, a, color }, i) => (
+            <div key={i} style={{
+              borderLeft: `3px solid ${color}`,
+              padding: "20px 24px",
+              marginBottom: "20px",
+              background: "rgba(255,255,255,0.01)",
+              borderRadius: "0 8px 8px 0"
+            }}>
+              <div style={{ fontSize: "12px", color: color, letterSpacing: "2px", marginBottom: "10px" }}>Q: {q}</div>
+              <div style={{ fontSize: "13px", color: "#94A3B8", lineHeight: "1.7", fontStyle: i === 0 ? "italic" : "normal" }}>{a}</div>
+            </div>
+          ))}
+
+          <div style={{ marginTop: "32px", padding: "24px", border: "1px solid #00FFB230", borderRadius: "8px", background: "rgba(0,255,178,0.03)" }}>
+            <div style={{ fontSize: "10px", letterSpacing: "4px", color: "#00FFB2", marginBottom: "12px" }}>KILLER CLOSER</div>
+            <div style={{ fontSize: "15px", color: "#F8FAFC", lineHeight: "1.8", fontStyle: "italic" }}>
+              "The core insight of VERITY is that LLM generation and LLM verification are two different capabilities — and existing systems conflate them by asking the same model to both produce and check its own work. VERITY separates them completely. The generator generates. Independent verifiers verify. This architectural separation is why it works."
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
